@@ -4,11 +4,20 @@ import Link from "next/link";
 import { ChangeEvent, DragEvent, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { useSession } from "next-auth/react";
 import Chat from "../components/Chat";
 import RedesignPreview from "../components/RedesignPreview";
+import FreeLimitModal from "../components/FreeLimitModal";
 import { coerceRedesignSpec, type RedesignSpec } from "@/app/lib/redesign";
 
-type ApiResponse = { analysis?: unknown; redesign?: unknown; error?: unknown };
+type ApiResponse = {
+  analysis?: unknown;
+  redesign?: unknown;
+  error?: unknown;
+  usage?: unknown;
+  remaining?: unknown;
+  limit?: unknown;
+};
 
 const allowedTypes = ["image/png", "image/jpeg", "image/webp"];
 const maxFileSize = 10 * 1024 * 1024;
@@ -29,6 +38,8 @@ function getApiError(d: ApiResponse, fallback: string) {
 }
 
 export default function RedesignPage() {
+  const { data: session } = useSession();
+  const isAuthed = !!session?.user;
   const [file, setFile] = useState<File | null>(null);
   const [imageUrl, setImageUrl] = useState("");
   const [fileName, setFileName] = useState("");
@@ -39,12 +50,52 @@ export default function RedesignPage() {
   const [error, setError] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
+  const [usage, setUsage] = useState(0);
+  const [remaining, setRemaining] = useState(3);
+  const [limitModalOpen, setLimitModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const objectUrlRef = useRef<string>("");
+  const inFlightRef = useRef(false);
   const reduce = useReducedMotion();
 
   const loading = phase !== "";
   const busy = loading || regenerating;
+
+  function applyUsage(d: ApiResponse) {
+    if (typeof d.usage === "number" && Number.isFinite(d.usage)) {
+      setUsage(Math.max(0, Math.min(3, Math.floor(d.usage))));
+    }
+    if (typeof d.remaining === "number" && Number.isFinite(d.remaining)) {
+      setRemaining(Math.max(0, Math.min(3, Math.floor(d.remaining))));
+    }
+  }
+
+  // Load server-authoritative usage on mount / auth change (never localStorage).
+  // State updates happen in promise continuations, not the effect body.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/usage", { cache: "no-store" })
+      .then((res) => res.json().catch(() => ({})))
+      .then((data) => {
+        if (cancelled) return;
+        const d = data as ApiResponse & { authenticated?: boolean };
+        if (d.authenticated) {
+          setUsage(0);
+          setRemaining(3);
+          return;
+        }
+        if (typeof d.usage === "number" && Number.isFinite(d.usage)) {
+          setUsage(Math.max(0, Math.min(3, Math.floor(d.usage))));
+        }
+        if (typeof d.remaining === "number" && Number.isFinite(d.remaining)) {
+          setRemaining(Math.max(0, Math.min(3, Math.floor(d.remaining))));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthed]);
 
   // cycle processing text without cascading setState in effect body
   useEffect(() => {
@@ -114,8 +165,11 @@ export default function RedesignPage() {
 
   async function runFlow(opts?: { regenerate?: boolean }) {
     if (!file) { setError("Please select a website screenshot first."); return; }
+    // In-flight guard: prevents double-clicks from consuming multiple uses.
+    if (inFlightRef.current) return;
     const isRegen = !!opts?.regenerate;
 
+    inFlightRef.current = true;
     if (isRegen) setRegenerating(true);
     else {
       setError("");
@@ -123,6 +177,17 @@ export default function RedesignPage() {
       setRedesign(null);
       setStepIndex(0);
       setPhase("analyzing");
+    }
+
+    function isLimitError(status: number, data: ApiResponse) {
+      return status === 403 && data.error === "FREE_LIMIT_REACHED";
+    }
+
+    function handleLimit(data: ApiResponse) {
+      applyUsage(data);
+      setUsage(3);
+      setRemaining(0);
+      setLimitModalOpen(true);
     }
 
     try {
@@ -152,15 +217,27 @@ export default function RedesignPage() {
       // use /api/generate (uses image + analysis) - keep existing contract
       const redesignRes = await fetch("/api/generate", { method: "POST", body: rfd });
       const redesignData = await readJson(redesignRes);
-      if (!redesignRes.ok) throw new Error(getApiError(redesignData, "Failed to generate the redesign."));
+      if (!redesignRes.ok) {
+        if (isLimitError(redesignRes.status, redesignData)) {
+          handleLimit(redesignData);
+          return;
+        }
+        throw new Error(getApiError(redesignData, "Failed to generate the redesign."));
+      }
       if (!redesignData.redesign) throw new Error("Gemini returned no redesign data.");
       setRedesign(coerceRedesignSpec(redesignData.redesign));
+      // Authoritative server count — update the indicator immediately.
+      applyUsage(redesignData);
+      if (typeof redesignData.remaining === "number" && redesignData.remaining <= 0) {
+        setLimitModalOpen(true);
+      }
     } catch (err) {
       console.error(err);
       setError(err instanceof Error ? err.message : "Something went wrong while processing the screenshot.");
     } finally {
       setPhase("");
       setRegenerating(false);
+      inFlightRef.current = false;
     }
   }
 
@@ -179,10 +256,32 @@ export default function RedesignPage() {
             <span className="flex h-7 w-7 items-center justify-center rounded-full border border-white/10 bg-white/5 text-xs">←</span>
             Back to home
           </Link>
+          <div className="flex flex-wrap items-center justify-end gap-2">
           <span className="hidden items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs text-white/50 md:inline-flex">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
             Studio mode
           </span>
+          {!isAuthed && (
+            <span
+              className="inline-flex items-center gap-2 rounded-full border border-cyan-400/20 bg-cyan-400/[0.07] px-3 py-1 text-xs font-medium text-cyan-100"
+              role="status"
+              aria-live="polite"
+              aria-label={`${usage} of 3 free redesigns used`}
+              title="Server-tracked free uses"
+            >
+              <span className="text-[10px] font-semibold tracking-[0.14em] text-cyan-300">FREE USES</span>
+              <span className="flex items-center gap-1" aria-hidden>
+                {[0, 1, 2].map((i) => (
+                  <span
+                    key={i}
+                    className={`h-1.5 w-1.5 rounded-full ${i < usage ? "bg-cyan-400" : "bg-white/20"}`}
+                  />
+                ))}
+              </span>
+              <span className="tabular-nums text-white/70">{usage} / 3 used</span>
+            </span>
+          )}
+          </div>
         </div>
 
         <header className="mt-8 max-w-3xl">
@@ -296,6 +395,16 @@ export default function RedesignPage() {
                   <>Analyze and redesign →</>
                 )}
               </button>
+
+              {!isAuthed && (
+                <p className="mt-2 text-center text-xs text-white/35" role="status" aria-live="polite">
+                  {remaining > 0 ? (
+                    <>{remaining} free redesign{remaining === 1 ? "" : "s"} remaining · no sign-in needed</>
+                  ) : (
+                    <>Free limit reached · sign in to keep creating</>
+                  )}
+                </p>
+              )}
 
               {/* status */}
               <AnimatePresence>
@@ -477,6 +586,7 @@ export default function RedesignPage() {
       </div>
 
       <Chat />
+      <FreeLimitModal open={limitModalOpen} onClose={() => setLimitModalOpen(false)} />
     </main>
   );
 }

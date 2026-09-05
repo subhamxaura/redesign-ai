@@ -1,6 +1,11 @@
 import { promises as fs } from "fs";
 import path from "path";
 import bcrypt from "bcryptjs";
+import {
+  isRedisConfigured,
+  redisGet,
+  redisSet,
+} from "@/app/lib/store";
 
 export type StoredUser = {
   id: string;
@@ -89,13 +94,44 @@ export async function getAllUsers(): Promise<StoredUser[]> {
 
 export async function getUserByEmail(email: string): Promise<StoredUser | null> {
   const normalized = email.toLowerCase().trim();
+  // Prefer Redis when configured so logins survive Vercel serverless instances.
+  if (isRedisConfigured()) {
+    try {
+      const raw = await redisGet(userKey(normalized));
+      if (raw) {
+        const parsed = JSON.parse(raw) as StoredUser;
+        if (parsed && parsed.email) return parsed;
+      }
+      return null;
+    } catch (err) {
+      console.error("Redis user lookup failed, falling back to file:", err);
+    }
+  }
   const users = await getAllUsers();
   return users.find((u) => u.email.toLowerCase() === normalized) ?? null;
 }
 
 export async function getUserById(id: string): Promise<StoredUser | null> {
+  if (isRedisConfigured()) {
+    try {
+      const email = await redisGet(`rdai:userid:${id}`);
+      if (email) {
+        const raw = await redisGet(userKey(email));
+        if (raw) {
+          const parsed = JSON.parse(raw) as StoredUser;
+          if (parsed && parsed.id === id) return parsed;
+        }
+      }
+    } catch (err) {
+      console.error("Redis user-id lookup failed, falling back to file:", err);
+    }
+  }
   const users = await getAllUsers();
   return users.find((u) => u.id === id) ?? null;
+}
+
+function userKey(normalizedEmail: string): string {
+  return `rdai:user:${normalizedEmail.toLowerCase().trim()}`;
 }
 
 export async function createUser(params: {
@@ -120,6 +156,25 @@ export async function createUser(params: {
   const users = await getAllUsers();
   users.push(user);
   memoryUsers = users;
+  // Mirror to Redis atomically-ish (NX prevents duplicate-email races on
+  // multi-instance Vercel). File write is best-effort local persistence.
+  if (isRedisConfigured()) {
+    try {
+      const created = await redisSet(userKey(normalizedEmail), JSON.stringify(user), {
+        nx: true,
+      });
+      if (!created) {
+        // Another instance won the race — keep stores consistent.
+        memoryUsers = memoryUsers.filter((u) => u.id !== user.id);
+        throw new Error("An account with this email already exists.");
+      }
+      // Secondary id -> email index (best-effort, no NX needed).
+      await redisSet(`rdai:userid:${user.id}`, normalizedEmail).catch(() => false);
+    } catch (err) {
+      if (err instanceof Error && err.message.toLowerCase().includes("already exists")) throw err;
+      console.error("Redis user persist failed, using file fallback:", err);
+    }
+  }
   try {
     await writeUsersToDisk(users);
   } catch (err) {

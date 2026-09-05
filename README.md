@@ -39,7 +39,14 @@ For Vercel production, set the same three variables in **Project → Settings �
 - `NEXTAUTH_SECRET` (≥32 chars)
 - `NEXTAUTH_URL` = `https://your-domain.vercel.app`
 
-No database is required for local auth — users are stored in `data/users.json` (gitignored, file-based + in-memory cache, bcrypt-hashed passwords, HttpOnly JWT). For team/production persistence, migrate `app/lib/users.ts` to Postgres/Prisma and add a Prisma adapter.
+No database is required for local development — users are stored in `data/users.json` and anonymous free-use counts in `data/anon-usage.json` (both gitignored, file-based + in-memory cache, bcrypt-hashed passwords, HttpOnly JWT).
+
+For **production on Vercel**, the filesystem is ephemeral and there are many serverless instances, so configure Upstash Redis (serverless-friendly, free tier works) in **Project → Settings → Environment Variables**:
+
+- `UPSTASH_REDIS_REST_URL=https://<id>.upstash.io`
+- `UPSTASH_REDIS_REST_TOKEN=<token>`
+
+When set, both user accounts and anonymous usage counters persist in Redis with atomic increments — logins survive redeploys and the 3-free-use limit is enforced across all instances. When unset, the app falls back to file + memory (fine locally, best-effort on Vercel).
 
 ## Development
 
@@ -58,4 +65,5 @@ Open `http://localhost:3000`.
 - `/signin` — sign in (supports `?callbackUrl=/redesign`)
 - `/dashboard` — private, recent redesigns + usage
 - `/profile` — private, account details + sign out
-- `/redesign` — private, upload → analyze → redesign (redirects to `/signin?callbackUrl=/redesign` when logged out)
+- `/redesign` — public, upload → analyze → redesign (anonymous users get 3 free server-enforced generations, then a sign-in wall)
+- `GET /api/usage` — server-authoritative free-use status (`{ usage, remaining, limit }`)

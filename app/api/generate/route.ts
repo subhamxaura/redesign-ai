@@ -1,4 +1,16 @@
 import { NextResponse } from "next/server";
+import { getServerSession } from "next-auth";
+import { authOptions } from "@/app/lib/auth";
+import {
+  applyAnonCookie,
+  getAnonIdFromCookieHeader,
+  getFreeUsage,
+  isValidAnonId,
+  limitReachedResponse,
+  newAnonId,
+  refundFreeUse,
+  reserveFreeUse,
+} from "@/app/lib/freeUsage";
 
 import {
   fileToInlineData,
@@ -17,7 +29,31 @@ import {
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
+  // One completed call to this endpoint = exactly ONE free use.
+  // /api/analyze is deliberately NOT counted (analysis alone is not a redesign).
+  let anonId: string | null = null;
+  let reserved = false;
+  const setAnonCookie = (res: NextResponse) => {
+    if (anonId) applyAnonCookie(res, anonId);
+  };
+
   try {
+    const session = await getServerSession(authOptions);
+    const isAuthed = !!session?.user?.email;
+
+    if (!isAuthed) {
+      const fromCookie = getAnonIdFromCookieHeader(request.headers.get("cookie"));
+      anonId = isValidAnonId(fromCookie) ? fromCookie : newAnonId();
+
+      // Fast pre-check BEFORE expensive Gemini work (friendly early 403).
+      const current = await getFreeUsage(anonId);
+      if (current.remaining <= 0) {
+        const res = NextResponse.json(limitReachedResponse(current.usage), { status: 403 });
+        setAnonCookie(res);
+        return res;
+      }
+    }
+
     const formData = await request.formData();
 
     const image = validateImageUpload(formData.get("image"));
@@ -35,6 +71,24 @@ export async function POST(request: Request) {
         { error: "No design analysis provided." },
         { status: 400 }
       );
+    }
+
+    // Atomically reserve one use AFTER validation passes and BEFORE Gemini
+    // runs. This closes the double-click race: two simultaneous requests
+    // cannot both reserve the last slot. Refunded on any later failure so
+    // failures are never counted.
+    let usageAfter: number | null = null;
+    if (!isAuthed && anonId) {
+      const reservation = await reserveFreeUse(anonId);
+      if (!reservation.allowed) {
+        const res = NextResponse.json(limitReachedResponse(reservation.usage), {
+          status: 403,
+        });
+        setAnonCookie(res);
+        return res;
+      }
+      reserved = true;
+      usageAfter = reservation.usage;
     }
 
     const ai = getGeminiClient();
@@ -141,22 +195,39 @@ Do not include explanations outside the JSON.
     const rawText = response.text?.trim();
 
     if (!rawText) {
-      return NextResponse.json(
+      // Gemini failure — refund so failures are never counted.
+      if (anonId && reserved) await refundFreeUse(anonId);
+      const res = NextResponse.json(
         { error: "Gemini returned an empty redesign." },
         { status: 500 }
       );
+      setAnonCookie(res);
+      return res;
     }
 
     const redesign = parseRedesignSpecJson(rawText);
 
-    return NextResponse.json({
+    // SUCCESS — the reservation becomes the counted use. usageAfter holds the
+    // authoritative server-side count for the UI indicator.
+    const res = NextResponse.json({
       success: true,
       redesign,
+      ...(usageAfter != null
+        ? {
+            usage: usageAfter,
+            remaining: Math.max(0, 3 - usageAfter),
+            limit: 3,
+          }
+        : { authenticated: true }),
     });
+    setAnonCookie(res);
+    return res;
   } catch (error: unknown) {
     console.error("AI redesign error:", error);
+    // Any failure (Gemini 429/503/timeout/server error) refunds the slot.
+    if (anonId && reserved) await refundFreeUse(anonId).catch(() => {});
 
-    return NextResponse.json(
+    const res = NextResponse.json(
       {
         error: getErrorMessage(
           error,
@@ -165,5 +236,7 @@ Do not include explanations outside the JSON.
       },
       { status: 500 }
     );
+    setAnonCookie(res);
+    return res;
   }
 }

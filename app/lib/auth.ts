@@ -1,19 +1,7 @@
 import type { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
 import { getUserByEmail, verifyPassword } from "@/app/lib/users";
-
-function getAuthSecret(): string {
-  const secret = process.env.NEXTAUTH_SECRET?.trim();
-  if (secret && secret.length >= 16) return secret;
-  // Fallback for local dev — not for production
-  if (process.env.NODE_ENV === "production") {
-    console.warn(
-      "NEXTAUTH_SECRET is missing or weak. Set a 32+ character secret in .env.local and Vercel."
-    );
-  }
-  // Deterministic dev fallback so builds don't fail; will be overridden in prod
-  return secret || "dev-fallback-secret-please-set-NEXTAUTH_SECRET-32chars!!";
-}
+import { getAuthSecret } from "@/app/lib/authSecret";
 
 export const authOptions: NextAuthOptions = {
   secret: getAuthSecret(),

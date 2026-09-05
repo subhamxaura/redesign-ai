@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getToken } from "next-auth/jwt";
+import { getAuthSecret } from "@/app/lib/authSecret";
 
-const PROTECTED = ["/redesign", "/dashboard", "/profile"];
+// /redesign is intentionally PUBLIC — anonymous visitors get 3 free
+// server-enforced generations before any sign-in wall.
+const PROTECTED = ["/dashboard", "/profile"];
 const AUTH_PAGES = ["/signin", "/signup"];
 
 function isProtected(pathname: string) {
@@ -32,7 +35,11 @@ export async function middleware(request: NextRequest) {
 
   const token = await getToken({
     req: request,
-    secret: process.env.NEXTAUTH_SECRET,
+    // MUST match the secret used in authOptions — shared helper (authSecret.ts).
+    // Previously middleware used process.env.NEXTAUTH_SECRET directly while
+    // authOptions used a dev fallback, which desynced sessions when the env
+    // var was missing/weak and broke login persistence.
+    secret: getAuthSecret(),
   });
 
   const isAuthed = !!token;
@@ -60,5 +67,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/redesign/:path*", "/dashboard/:path*", "/profile/:path*", "/signin", "/signup"],
+  matcher: ["/dashboard/:path*", "/profile/:path*", "/signin", "/signup"],
 };

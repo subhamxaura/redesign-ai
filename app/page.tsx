@@ -58,8 +58,8 @@ export default function Home() {
     await signOut({ callbackUrl: "/" });
   }
 
-  const getStartedHref = isAuthed ? "/redesign" : "/signup";
-  const heroCtaHref = isAuthed ? "/redesign" : "/signup";
+  const getStartedHref = "/redesign";
+  const heroCtaHref = "/redesign";
 
   return (
     <main className="relative min-h-screen overflow-hidden bg-[#05070a] text-white selection:bg-cyan-400/30">
@@ -232,7 +232,7 @@ export default function Home() {
                 <Link href="/signin" onClick={() => setMobileOpen(false)} className="rounded-xl bg-white px-3 py-2.5 text-center font-semibold text-black">
                   Sign In
                 </Link>
-                <Link href="/signup" onClick={() => setMobileOpen(false)} className="rounded-xl bg-cyan-400 px-3 py-2.5 text-center font-semibold text-black">
+                <Link href="/redesign" onClick={() => setMobileOpen(false)} className="rounded-xl bg-cyan-400 px-3 py-2.5 text-center font-semibold text-black">
                   Get Started
                 </Link>
               </>
@@ -307,7 +307,7 @@ export default function Home() {
 
           {!isAuthed && (
             <motion.p variants={item} className="mt-3 text-xs text-white/30">
-              No credit card required · Secure signup in 20 seconds
+              3 free redesigns · No credit card required
             </motion.p>
           )}
 
