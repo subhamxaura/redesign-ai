@@ -1,6 +1,6 @@
-import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions } from "@/app/lib/auth";
+import { noStoreJson, enforceOrRateLimit, errorResponse } from "@/app/lib/api";
 import {
   FREE_LIMIT,
   applyAnonCookie,
@@ -9,6 +9,7 @@ import {
   isValidAnonId,
   newAnonId,
 } from "@/app/lib/freeUsage";
+import { getRateLimitIdentity } from "@/app/lib/http";
 
 export const runtime = "nodejs";
 
@@ -19,9 +20,15 @@ export const runtime = "nodejs";
  */
 export async function GET(request: Request) {
   try {
+    const rateLimitKey = getRateLimitIdentity(request);
+    const limited = await enforceOrRateLimit([
+      { key: `usage:${rateLimitKey}`, limit: 120, windowSeconds: 60 },
+    ]);
+    if (limited) return limited;
+
     const session = await getServerSession(authOptions);
     if (session?.user?.email) {
-      return NextResponse.json({
+      return noStoreJson({
         authenticated: true,
         usage: 0,
         remaining: FREE_LIMIT,
@@ -36,22 +43,16 @@ export async function GET(request: Request) {
 
     const { usage, remaining, limit } = await getFreeUsage(anonId);
 
-    const res = NextResponse.json({
+    const res = noStoreJson({
       authenticated: false,
       usage,
       remaining,
       limit,
       limitReached: remaining <= 0,
     });
-    // Always (re)assert the cookie so anonymous browsers keep a stable ID.
-    // Re-setting an existing valid ID is harmless and self-heals expiry.
     applyAnonCookie(res, anonId);
     return res;
-  } catch (error) {
-    console.error("Usage status error:", error);
-    return NextResponse.json(
-      { authenticated: false, usage: 0, remaining: FREE_LIMIT, limit: FREE_LIMIT },
-      { status: 200 }
-    );
+  } catch (error: unknown) {
+    return errorResponse(error, "Usage status is temporarily unavailable.");
   }
 }

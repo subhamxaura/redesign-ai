@@ -1,24 +1,29 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
+import { errorResponse, enforceOrRateLimit, noStoreJson } from "@/app/lib/api";
 import { authOptions } from "@/app/lib/auth";
 import {
   applyAnonCookie,
+  FREE_LIMIT,
   getAnonIdFromCookieHeader,
-  getFreeUsage,
   isValidAnonId,
   limitReachedResponse,
+  networkKeyForIp,
   newAnonId,
   refundFreeUse,
   reserveFreeUse,
 } from "@/app/lib/freeUsage";
 import {
-  fileToInlineData,
+  generateGeminiContent,
   GEMINI_STRUCTURED_MODEL,
-  getErrorMessage,
   getGeminiClient,
-  validateImageUpload,
-  withGeminiRetry,
+  readGeminiResponseText,
 } from "@/app/lib/gemini";
+import { assertSameOrigin, getClientIp, getRateLimitIdentity, readFormDataWithLimit } from "@/app/lib/http";
+import {
+  fileToInlineData,
+  validateImageUpload,
+} from "@/app/lib/imageValidation";
 import {
   parseRedesignSpecJson,
   redesignResponseSchema,
@@ -26,121 +31,105 @@ import {
 
 export const runtime = "nodejs";
 
+const MAX_REDESIGN_RESPONSE_CHARS = 50_000;
+
 export async function POST(request: Request) {
-  // Legacy single-shot endpoint: one completed call = exactly ONE free use.
-  // Shares the centralized gate with /api/generate so a single user action
-  // is never double-counted.
   let anonId: string | null = null;
+  let networkHash: string | null = null;
   let reserved = false;
+
   const setAnonCookie = (res: NextResponse) => {
     if (anonId) applyAnonCookie(res, anonId);
+    return res;
   };
 
   try {
+    assertSameOrigin(request);
+    const rateLimitKey = getRateLimitIdentity(request);
+    const limited = await enforceOrRateLimit([
+      { key: `redesign:${rateLimitKey}`, limit: 15, windowSeconds: 60 * 60 },
+    ]);
+    if (limited) return limited;
+
     const session = await getServerSession(authOptions);
-    const isAuthed = !!session?.user?.email;
+    const isAuthed = Boolean(session?.user?.email);
 
     if (!isAuthed) {
       const fromCookie = getAnonIdFromCookieHeader(request.headers.get("cookie"));
       anonId = isValidAnonId(fromCookie) ? fromCookie : newAnonId();
-
-      const current = await getFreeUsage(anonId);
-      if (current.remaining <= 0) {
-        const res = NextResponse.json(limitReachedResponse(current.usage), { status: 403 });
-        setAnonCookie(res);
-        return res;
-      }
+      networkHash = networkKeyForIp(getClientIp(request));
     }
 
-    const formData = await request.formData();
-    const image = validateImageUpload(formData.get("image"));
+    const formData = await readFormDataWithLimit(request);
+    const image = await validateImageUpload(formData.get("image"));
 
     if (!image.ok) {
-      return NextResponse.json(
-        { error: image.error },
-        { status: image.status }
+      return setAnonCookie(
+        NextResponse.json({ error: image.error }, { status: image.status })
       );
     }
 
     let usageAfter: number | null = null;
     if (!isAuthed && anonId) {
-      const reservation = await reserveFreeUse(anonId);
+      const reservation = await reserveFreeUse(anonId, networkHash);
       if (!reservation.allowed) {
-        const res = NextResponse.json(limitReachedResponse(reservation.usage), {
-          status: 403,
-        });
-        setAnonCookie(res);
-        return res;
+        return setAnonCookie(
+          NextResponse.json(limitReachedResponse(reservation.usage), {
+            status: 403,
+          })
+        );
       }
       reserved = true;
       usageAfter = reservation.usage;
     }
 
     const ai = getGeminiClient();
-    const imagePart = await fileToInlineData(image.file);
-    const response = await withGeminiRetry(() =>
-      ai.models.generateContent({
-        model: GEMINI_STRUCTURED_MODEL,
-        contents: [
-          imagePart,
-          {
-            text: `
+    const response = await generateGeminiContent(ai, {
+      model: GEMINI_STRUCTURED_MODEL,
+      contents: [
+        fileToInlineData(image.buffer, image.mimeType),
+        {
+          text: `
 You are an expert UI/UX designer and frontend developer.
 
 Analyze the uploaded website or app screenshot and create a modern redesign specification.
 
 Rules:
 - Preserve the original website's main purpose.
-- Use realistic content based on what is visible.
-- Do not invent unrelated sections.
+- Use realistic content based only on what is visible.
+- Do not invent unrelated sections, products, features, or claims.
 - Choose colors that match the original brand.
 - Keep the result practical for a Next.js and Tailwind CSS developer.
 - Return only JSON matching the requested schema.
           `,
-          },
-        ],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: redesignResponseSchema,
         },
+      ],
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: redesignResponseSchema,
+      },
+    });
+    const rawText = readGeminiResponseText(response, MAX_REDESIGN_RESPONSE_CHARS);
+    const redesign = parseRedesignSpecJson(rawText);
+
+    return setAnonCookie(
+      noStoreJson({
+        success: true,
+        redesign,
+        ...(usageAfter != null
+          ? {
+              usage: usageAfter,
+              remaining: Math.max(0, FREE_LIMIT - usageAfter),
+              limit: FREE_LIMIT,
+            }
+          : { authenticated: true }),
       })
     );
-    const rawText = response.text?.trim();
-
-    if (!rawText) {
-      if (anonId && reserved) await refundFreeUse(anonId);
-      const res = NextResponse.json(
-        { error: "Gemini returned an empty redesign." },
-        { status: 500 }
-      );
-      setAnonCookie(res);
-      return res;
+  } catch (error: unknown) {
+    if (anonId && reserved) {
+      await refundFreeUse(anonId, networkHash).catch(() => {});
     }
 
-    const res = NextResponse.json({
-      success: true,
-      redesign: parseRedesignSpecJson(rawText),
-      ...(usageAfter != null
-        ? {
-            usage: usageAfter,
-            remaining: Math.max(0, 3 - usageAfter),
-            limit: 3,
-          }
-        : { authenticated: true }),
-    });
-    setAnonCookie(res);
-    return res;
-  } catch (error: unknown) {
-    console.error("Redesign generation error:", error);
-    if (anonId && reserved) await refundFreeUse(anonId).catch(() => {});
-
-    const res = NextResponse.json(
-      {
-        error: getErrorMessage(error, "Failed to generate redesign."),
-      },
-      { status: 500 }
-    );
-    setAnonCookie(res);
-    return res;
+    return setAnonCookie(errorResponse(error, "Failed to generate redesign."));
   }
 }

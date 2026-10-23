@@ -1,67 +1,57 @@
 import { NextResponse } from "next/server";
-import { createUser, validateSignupInput, checkRateLimit } from "@/app/lib/users";
+import { errorResponse, enforceOrRateLimit, noStoreJson } from "@/app/lib/api";
+import { InvalidRequestError } from "@/app/lib/errors";
+import { assertSameOrigin, getRateLimitIdentity, readJsonBody } from "@/app/lib/http";
+import { createUser, DuplicateAccountError } from "@/app/lib/users";
+import {
+  firstValidationMessage,
+  signupSchema,
+} from "@/app/lib/validation";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
-    const ip =
-      request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
-      request.headers.get("x-real-ip")?.trim() ||
-      "unknown";
+    assertSameOrigin(request);
+    const rateLimitKey = getRateLimitIdentity(request);
+    const ipLimited = await enforceOrRateLimit([
+      { key: `signup-ip:${rateLimitKey}`, limit: 5, windowSeconds: 60 * 60 },
+    ]);
+    if (ipLimited) return ipLimited;
 
-    const rate = checkRateLimit(`signup:${ip}`, 5, 60 * 1000);
-    if (!rate.allowed) {
-      return NextResponse.json(
-        { error: "Too many attempts. Please wait a minute and try again." },
-        { status: 429 }
+    const parsed = signupSchema.safeParse(await readJsonBody(request));
+    if (!parsed.success) {
+      throw new InvalidRequestError(
+        firstValidationMessage(parsed.error, "Please check your signup details.")
       );
     }
 
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
-    }
+    const { name, email, password } = parsed.data;
 
-    const input = body as {
-      name?: unknown;
-      email?: unknown;
-      password?: unknown;
-      confirmPassword?: unknown;
-    };
-
-    const validation = validateSignupInput(input);
-    if (!validation.valid) {
-      return NextResponse.json({ error: validation.error }, { status: 400 });
-    }
-
-    const name = (input.name as string).trim();
-    const email = (input.email as string).trim().toLowerCase();
-    const password = input.password as string;
+    const accountLimited = await enforceOrRateLimit([
+      { key: `signup-email:${email}`, limit: 3, windowSeconds: 24 * 60 * 60 },
+    ]);
+    if (accountLimited) return accountLimited;
 
     try {
       const user = await createUser({ name, email, password });
-      return NextResponse.json(
+      return noStoreJson(
         {
           success: true,
           user: { id: user.id, name: user.name, email: user.email },
         },
         { status: 201 }
       );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to create account.";
-      if (msg.toLowerCase().includes("already exists")) {
-        return NextResponse.json({ error: msg }, { status: 409 });
+    } catch (error) {
+      if (error instanceof DuplicateAccountError) {
+        return NextResponse.json(
+          { error: "An account with this email already exists." },
+          { status: 409, headers: { "Cache-Control": "no-store" } }
+        );
       }
-      throw err;
+      throw error;
     }
-  } catch (error) {
-    console.error("Signup error:", error);
-    return NextResponse.json(
-      { error: "Something went wrong. Please try again." },
-      { status: 500 }
-    );
+  } catch (error: unknown) {
+    return errorResponse(error, "Something went wrong. Please try again.");
   }
 }
