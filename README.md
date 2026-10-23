@@ -34,19 +34,36 @@ GEMINI_MODEL=gemini-3.6-flash
 GEMINI_STRUCTURED_MODEL=gemini-3.6-flash
 ```
 
-For Vercel production, set the same three variables in **Project → Settings → Environment Variables**:
+For Vercel production, set at least these variables in **Project → Settings → Environment Variables**:
 - `GEMINI_API_KEY`
-- `NEXTAUTH_SECRET` (≥32 chars)
+- `NEXTAUTH_SECRET` (≥32 chars; production refuses to start without it)
 - `NEXTAUTH_URL` = `https://your-domain.vercel.app`
 
 No database is required for local development — users are stored in `data/users.json` and anonymous free-use counts in `data/anon-usage.json` (both gitignored, file-based + in-memory cache, bcrypt-hashed passwords, HttpOnly JWT).
 
-For **production on Vercel**, the filesystem is ephemeral and there are many serverless instances, so configure Upstash Redis (serverless-friendly, free tier works) in **Project → Settings → Environment Variables**:
+## Production storage
 
+Production **fails closed** (`503`) if durable storage is not configured. There is no silent ephemeral fallback.
+
+Configure one option:
+
+**Option A — Upstash Redis (recommended for Vercel/serverless):**
 - `UPSTASH_REDIS_REST_URL=https://<id>.upstash.io`
 - `UPSTASH_REDIS_REST_TOKEN=<token>`
 
-When set, both user accounts and anonymous usage counters persist in Redis with atomic increments — logins survive redeploys and the 3-free-use limit is enforced across all instances. When unset, the app falls back to file + memory (fine locally, best-effort on Vercel).
+**Option B — persistent volume (single instance):**
+- `DURABLE_FILE_STORAGE=true`
+- `REDESIGN_DATA_DIR=/mounted/persistent/path`
+
+Redis stores accounts, anonymous usage, and rate-limit buckets with atomic operations. File storage is only safe for a single long-lived instance; it is not suitable for Vercel's ephemeral filesystem.
+
+## Security and abuse controls
+
+- Anonymous free-use identity is a server-signed HttpOnly cookie, backed by a keyed network bucket (`ANON_NETWORK_FREE_LIMIT`, default `12` per 30 days). Clearing cookies does not reset the network bucket.
+- Login, signup, chat, analysis, and generation endpoints are rate limited through Redis or durable file storage.
+- Uploads are checked by magic bytes, declared MIME, byte size, and image dimensions — not just the client-supplied file type.
+- Gemini calls have finite retries, a per-attempt timeout (`GEMINI_REQUEST_TIMEOUT_MS`), bounded output, and generic public errors that do not expose provider details.
+- If a trusted reverse proxy overwrites `x-forwarded-for`/`x-real-ip`, set `TRUST_PROXY_HEADERS=true`. Vercel's `x-vercel-forwarded-for` is trusted automatically.
 
 ## Development
 
@@ -54,6 +71,7 @@ When set, both user accounts and anonymous usage counters persist in Redis with 
 npm run dev
 npm run lint
 npm run typecheck
+npm test
 npm run build
 ```
 

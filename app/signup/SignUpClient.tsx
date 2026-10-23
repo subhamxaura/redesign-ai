@@ -6,12 +6,10 @@ import { useState, useMemo } from "react";
 import { signIn } from "next-auth/react";
 import { motion, useReducedMotion } from "framer-motion";
 import AuthShell from "@/app/components/AuthShell";
+import { safeCallbackPath } from "@/app/lib/redirects";
 
 function safeCallback(value: string | null): string {
-  if (!value) return "/dashboard";
-  if (!value.startsWith("/") || value.startsWith("//")) return "/dashboard";
-  if (value.includes("\\") || value.includes(":") || value.includes("..")) return "/dashboard";
-  return value;
+  return safeCallbackPath(value);
 }
 
 export default function SignUpClient() {
@@ -44,6 +42,9 @@ export default function SignUpClient() {
     if (!password) return setError("Password is required.");
     if (password.length < 8) return setError("Password must be at least 8 characters.");
     if (password.length > 128) return setError("Password must be 128 characters or fewer.");
+    if (new TextEncoder().encode(password).length > 72) {
+      return setError("Password must be 72 bytes or fewer.");
+    }
     if (confirm !== password) return setError("Passwords do not match.");
 
     setLoading(true);

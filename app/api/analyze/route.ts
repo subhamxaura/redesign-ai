@@ -1,12 +1,17 @@
 import { NextResponse } from "next/server";
+import { errorResponse, enforceOrRateLimit, noStoreJson } from "@/app/lib/api";
+import {
+  generateGeminiContent,
+  GEMINI_MODEL,
+  getGeminiClient,
+  readGeminiResponseText,
+} from "@/app/lib/gemini";
 import {
   fileToInlineData,
-  GEMINI_MODEL,
-  getErrorMessage,
-  getGeminiClient,
   validateImageUpload,
-  withGeminiRetry,
-} from "@/app/lib/gemini";
+} from "@/app/lib/imageValidation";
+import { assertSameOrigin, getRateLimitIdentity, readFormDataWithLimit } from "@/app/lib/http";
+import { MAX_ANALYSIS_OUTPUT_CHARS } from "@/app/lib/validation";
 
 export const runtime = "nodejs";
 
@@ -117,45 +122,35 @@ Keep the recommendations directly connected to what is visible in the uploaded i
 
 export async function POST(request: Request) {
   try {
-    const formData = await request.formData();
-    const image = validateImageUpload(formData.get("image"));
+    assertSameOrigin(request);
+    const rateLimitKey = getRateLimitIdentity(request);
+    const limited = await enforceOrRateLimit([
+      { key: `analyze:${rateLimitKey}`, limit: 20, windowSeconds: 60 * 60 },
+    ]);
+    if (limited) return limited;
+
+    const formData = await readFormDataWithLimit(request);
+    const image = await validateImageUpload(formData.get("image"));
 
     if (!image.ok) {
-      return NextResponse.json(
-        { error: image.error },
-        { status: image.status }
-      );
+      return NextResponse.json({ error: image.error }, { status: image.status });
     }
 
     const ai = getGeminiClient();
-    const imagePart = await fileToInlineData(image.file);
-    const response = await withGeminiRetry(() =>
-      ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: [imagePart, { text: analysisPrompt }],
-      })
-    );
-    const analysis = response.text?.trim();
+    const response = await generateGeminiContent(ai, {
+      model: GEMINI_MODEL,
+      contents: [
+        fileToInlineData(image.buffer, image.mimeType),
+        { text: analysisPrompt },
+      ],
+    });
+    const analysis = readGeminiResponseText(response, MAX_ANALYSIS_OUTPUT_CHARS);
 
-    if (!analysis) {
-      return NextResponse.json(
-        { error: "Gemini returned an empty analysis." },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({
+    return noStoreJson({
       success: true,
       analysis,
     });
   } catch (error: unknown) {
-    console.error("AI analysis error:", error);
-
-    return NextResponse.json(
-      {
-        error: getErrorMessage(error, "Failed to analyze the image."),
-      },
-      { status: 500 }
-    );
+    return errorResponse(error, "Failed to analyze the image.");
   }
 }
