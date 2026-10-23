@@ -26,7 +26,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Setup Node.js
-        uses: actions/setup-node@499233a6033d715a758418c0a697fca62e8f927c # v4.0.2
+        uses: actions/setup-node@v4 # v4.0.2
         with:
           node-version: "24"
           cache: "npm"
@@ -43,7 +43,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Setup Node.js
-        uses: actions/setup-node@499233a6033d715a758418c0a697fca62e8f927c # v4.0.2
+        uses: actions/setup-node@v4 # v4.0.2
         with:
           node-version: "24"
           cache: "npm"
@@ -61,7 +61,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Setup Node.js
-        uses: actions/setup-node@499233a6033d715a758418c0a697fca62e8f927c # v4.0.2
+        uses: actions/setup-node@v4 # v4.0.2
         with:
           node-version: "24"
           cache: "npm"
@@ -79,7 +79,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Setup Node.js
-        uses: actions/setup-node@499233a6033d715a758418c0a697fca62e8f927c # v4.0.2
+        uses: actions/setup-node@v4 # v4.0.2
         with:
           node-version: "24"
           cache: "npm"
@@ -97,7 +97,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Setup Node.js
-        uses: actions/setup-node@499233a6033d715a758418c0a697fca62e8f927c # v4.0.2
+        uses: actions/setup-node@v4 # v4.0.2
         with:
           node-version: "24"
           cache: "npm"
@@ -115,7 +115,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Setup Node.js
-        uses: actions/setup-node@499233a6033d715a758418c0a697fca62e8f927c # v4.0.2
+        uses: actions/setup-node@v4 # v4.0.2
         with:
           node-version: "24"
           cache: "npm"
